@@ -155,6 +155,10 @@ Deliberate, documented, and deferred rather than hidden:
   next step.
 - **Login rate limits are per instance.** Each copy of user-service keeps its own counters; a shared
   Redis counter is the next step.
+- **The Postgres container has a fixed name** (`ecommerce-postgres`), so two checkouts of this
+  project cannot run side by side — the second silently attaches to the first's container rather
+  than failing. Every script depends on that name; removing it would mean looking the container up
+  by Compose label instead.
 - **No API gateway** — clients call each service directly.
 
 ## Roadmap
