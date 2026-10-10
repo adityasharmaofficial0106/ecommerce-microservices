@@ -1,9 +1,9 @@
 # E-commerce Microservices
 
 A production-patterned e-commerce backend: three independently deployable Spring Boot services,
-each owning its own PostgreSQL database, secured with JWT and communicating over REST.
+each owning its own PostgreSQL database, secured with RS256-signed JWTs and communicating over REST.
 
-**Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Docker · OpenFeign · Flyway · Testcontainers**
+**Java 26 · Spring Boot 3.5 · PostgreSQL 16 · Docker · OpenFeign · Flyway · Testcontainers**
 
 ---
 
@@ -20,27 +20,36 @@ no cross-service foreign keys. `order-service` is the only service that calls th
 synchronously via OpenFeign, forwarding the caller's JWT downstream.
 
 ```
-                    ┌─────────────────┐
-   POST /orders ───▶│  order-service  │
-                    └────────┬────────┘
-                    ┌────────┴────────┐
-                    ▼                 ▼
-            ┌──────────────┐  ┌─────────────────┐
-            │ user-service │  │ product-service │
-            │  customer +  │  │  batch price    │
-            │   address    │  │    lookup       │
-            └──────────────┘  └─────────────────┘
+                            client
+                              |
+                              v
+                     +------------------+
+                     |  order-service   |  :8083
+                     +--------+---------+
+                              |
+                  forwards the caller's JWT
+                              |
+              +---------------+---------------+
+              v                               v
+     +-----------------+           +-------------------+
+     |  user-service   | :8081     |  product-service  | :8082
+     |                 |           |                   |
+     |  customer +     |           |  batch price      |
+     |  address        |           |  lookup           |
+     +-----------------+           +-------------------+
 ```
 
 ## Quick start
 
 ```bash
-cp .env.example .env          # set every "change-me"; JWT_SECRET needs 32+ characters
+cp .env.example .env          # set every "change-me"
 docker compose up -d postgres # waits for healthy
 mvn clean package -DskipTests
 ```
 
-Run each service in its own terminal with the environment loaded:
+Run each service in its own terminal with the environment loaded. **Start user-service first** —
+it generates the RSA key pair on its first run, and the other two refuse to start without the
+public key.
 
 ```bash
 set -a; source .env; set +a
@@ -51,20 +60,18 @@ mvn -pl user-service spring-boot:run      # then product-service, then order-ser
 <summary>Windows PowerShell</summary>
 
 ```powershell
-Get-Content .env | ForEach-Object {
-  if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
-    [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim())
-  }
-}
-mvn -pl user-service spring-boot:run
+.\scripts\run.ps1 user        # loads .env, validates it, then starts the service
+.\scripts\run.ps1 product
+.\scripts\run.ps1 order
 ```
 </details>
 
 Then populate a realistic catalogue and order history, and verify the platform end to end:
 
 ```powershell
+.\scripts\doctor.ps1          # diagnoses the environment: ports, container, credentials, health
 .\scripts\seed-data.ps1       # 8 customers, 24 products, orders across every lifecycle state
-.\scripts\verify-phase2.ps1   # ~45 checks: authentication, authorization, business rules
+.\scripts\verify-phase2.ps1   # 48 checks: authentication, authorization, business rules
 ```
 
 API docs: `/swagger-ui.html` on each port. Health: `/actuator/health`.
@@ -75,6 +82,22 @@ Authentication is issued once by user-service at `POST /api/v1/auth/login` and v
 **locally** by every service — no service calls another to validate a token, so authentication
 survives user-service being down.
 
+Tokens are signed with **RS256**: user-service holds the private key and is the only service on
+the platform that can issue a token. The other two hold the public key, which verifies signatures
+and is mathematically incapable of producing one.
+
+```
+   user-service                 product-service / order-service
+   +---------------------+      +---------------------------+
+   |  PRIVATE key        |      |  PUBLIC key               |
+   |  signs + verifies   |      |  verifies only            |
+   |  never leaves here  |      |  CANNOT issue a token     |
+   +---------------------+      +---------------------------+
+```
+
+The key pair is generated on first startup and written to `keys/`, which is git-ignored. A leaked
+private key would allow anyone to mint a token claiming any customer id with the `ADMIN` role.
+
 | Rule | Enforcement |
 |---|---|
 | Default deny | `anyRequest().authenticated()` is the last rule; new endpoints ship closed |
@@ -84,7 +107,8 @@ survives user-service being down.
 | Token propagation | order-service forwards the caller's token, so downstream ownership rules apply unchanged |
 | Stateless | No `HttpSession` is ever created; any instance can serve any request |
 
-Login is rate limited per IP and per email (token buckets), checked before the password is. Passwords are BCrypt-hashed. Login failures are indistinguishable — an unknown email and a wrong
+Login is rate limited per IP and per email (token buckets), checked before the password is.
+Passwords are BCrypt-hashed. Login failures are indistinguishable — an unknown email and a wrong
 password return the same 401, so the API cannot be used to enumerate registered addresses.
 
 ## Design decisions
@@ -93,6 +117,8 @@ The reasoning behind each of these is in [docs/phase-1-design.md](docs/phase-1-d
 [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 - **Database per service**, enforced by separate logins and `REVOKE ALL ... FROM PUBLIC`
+- **Asymmetric token signing (RS256)**, so the ability to verify a token is not the ability to
+  issue one — a compromise of any single service cannot escalate to the whole platform
 - **Prices are never accepted from the client** — `OrderItemRequest` has no price field, so the
   protection is structural rather than a validation rule someone can forget
 - **Orders snapshot what they reference** (unit price, product name, SKU, shipping address), so a
@@ -122,8 +148,8 @@ The reasoning behind each of these is in [docs/phase-1-design.md](docs/phase-1-d
 
 Deliberate, documented, and deferred rather than hidden:
 
-- **HS256 uses one shared secret**, so any service able to verify a token could also mint one.
-  RS256 — private key to sign, public key to verify — is the fix.
+- **The public key is distributed as a file.** Production systems publish it at a JWKS endpoint
+  (`/.well-known/jwks.json`) so verifiers fetch it and key rotation needs no redeployment.
 - **Tokens cannot be revoked.** Deactivating a customer leaves their existing token valid until it
   expires. Short expiry (15 minutes) bounds the damage; refresh tokens and a Redis denylist are the
   next step.
