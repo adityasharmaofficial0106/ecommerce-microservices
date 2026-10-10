@@ -14,3 +14,9 @@ target/
 .vscode/
 .DS_Store
 HELP.md
+
+# JWT signing keys - never commit these
+keys/
+*.pem
+*.p12
+*.jks
