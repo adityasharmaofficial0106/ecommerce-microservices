@@ -276,10 +276,19 @@ Write-Head "Summary"
 
 if ($script:Failures -eq 0 -and $script:Warnings -eq 0) {
     Write-Host "   Everything checks out. Run .\scripts\verify-phase2.ps1 next." -ForegroundColor Green
+} elseif ($script:Failures -eq 0) {
+    # Warnings only. Nothing is broken - these are things not started yet.
+    # A diagnostic that cries wolf gets ignored, so do not say "failure" here.
+    Write-Host "   No failures - $($script:Warnings) warning(s)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "   The stack itself is sound. The items above are things that are not" -ForegroundColor DarkGray
+    Write-Host "   running yet rather than things that are broken. Start them with the" -ForegroundColor DarkGray
+    Write-Host "   FIX lines shown, then run this again." -ForegroundColor DarkGray
 } else {
-    Write-Host "   Failures: $($script:Failures)    Warnings: $($script:Warnings)" -ForegroundColor Yellow
+    Write-Host "   Failures: $($script:Failures)    Warnings: $($script:Warnings)" -ForegroundColor Red
     Write-Host ""
     Write-Host "   Fix the FIRST failure above and run this again. Later checks are" -ForegroundColor DarkGray
     Write-Host "   often just the first one echoing downstream." -ForegroundColor DarkGray
 }
 Write-Host ""
+
