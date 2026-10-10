@@ -49,6 +49,12 @@ services:
       - pgadmin-data:/var/lib/pgadmin
 
   # Application containers are opt-in: docker compose --profile apps up --build
+  #
+  # On a completely fresh checkout the ./keys directory does not exist yet, and
+  # product-service and order-service refuse to start without a public key. Run
+  # user-service once first so it generates the pair:
+  #   docker compose --profile apps up --build user-service
+  # then bring up the rest.
   user-service:
     build: ./user-service
     profiles: ["apps"]
@@ -59,6 +65,12 @@ services:
       USER_DB_URL: jdbc:postgresql://postgres:5432/ecommerce_user_db
       USER_DB_USERNAME: ${USER_DB_USERNAME}
       USER_DB_PASSWORD: ${USER_DB_PASSWORD}
+      JWT_KEY_DIR: /keys
+      JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES:-15}
+    volumes:
+      # Read-write: this is the only service that may hold a private key, and it
+      # generates the pair here on first run.
+      - ./keys:/keys
     ports:
       - "127.0.0.1:8081:8081"
 
@@ -72,6 +84,12 @@ services:
       PRODUCT_DB_URL: jdbc:postgresql://postgres:5432/ecommerce_product_db
       PRODUCT_DB_USERNAME: ${PRODUCT_DB_USERNAME}
       PRODUCT_DB_PASSWORD: ${PRODUCT_DB_PASSWORD}
+      JWT_PUBLIC_KEY_PATH: /keys/jwt-public.pem
+    volumes:
+      # Read-only. Mounting just jwt-public.pem would be stricter still, but a
+      # single-file bind mount fails if the file does not exist yet, and on a
+      # fresh checkout it does not. See the note under "apps" below.
+      - ./keys:/keys:ro
     ports:
       - "127.0.0.1:8082:8082"
 
@@ -85,9 +103,13 @@ services:
       ORDER_DB_URL: jdbc:postgresql://postgres:5432/ecommerce_order_db
       ORDER_DB_USERNAME: ${ORDER_DB_USERNAME}
       ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD}
+      JWT_PUBLIC_KEY_PATH: /keys/jwt-public.pem
       # Inside the Compose network, services are reachable by their service name.
       USER_SERVICE_URL: http://user-service:8081
       PRODUCT_SERVICE_URL: http://product-service:8082
+    volumes:
+      # Read-only, same reasoning as product-service.
+      - ./keys:/keys:ro
     ports:
       - "127.0.0.1:8083:8083"
 

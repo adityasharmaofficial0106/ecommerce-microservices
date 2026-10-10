@@ -8,6 +8,7 @@ Newest entries at the top. Each entry is self-contained, so you can read one wit
 
 **Phase 2 — Security**
 
+- Step 9 — RS256: asymmetric token signing
 - Step 8 — Rate limiting on login
 - Step 7 — Completing method-level authorization
 - Step 6 — Seed data: a shop that looks like a shop
@@ -22,6 +23,106 @@ Newest entries at the top. Each entry is self-contained, so you can read one wit
 - Step 3 — order-service
 - Step 2 — product-service
 - Step 1 — user-service and foundations
+
+---
+
+## Phase 2, Step 9 — RS256: asymmetric token signing
+
+Closes the last known limitation of Phase 2, named in Step 3 as a deliberate deferral.
+
+### The problem
+
+All three services shared one `JWT_SECRET`. With HS256 the key that **verifies** a signature is
+the key that **creates** one — there is no way to grant a service the ability to check tokens
+without also granting it the ability to issue them.
+
+So product-service and order-service each held everything needed to build
+`{"sub": "<any customer id>", "role": "ADMIN"}`, sign it, and present it anywhere on the platform.
+Any single service being compromised meant the whole platform was compromised. "This service has
+no issue method" was a convention, not a guarantee.
+
+### The fix
+
+```
+   user-service                      product-service / order-service
+   +-------------------------+       +----------------------------+
+   |  PRIVATE key  - signs   |       |  PUBLIC key - verifies     |
+   |  PUBLIC key   - verifies|       |  CANNOT issue a token      |
+   |  never leaves this app  |       |                            |
+   +-------------------------+       +----------------------------+
+```
+
+RSA splits the key in two. The public half verifies signatures and is mathematically incapable of
+producing them, so it is safe to distribute. The private half stays in user-service, which becomes
+the only thing on the platform that can mint an identity.
+
+### What changed
+
+| File | New / Changed | What it does |
+|---|---|---|
+| `user-service/.../configuration/RsaKeyProvider.java` | **New** | Loads the key pair from disk, or generates a 2048-bit pair and writes it as PEM on first startup |
+| `product-service/.../configuration/PublicKeyProvider.java` | **New** | Loads the public key only; refuses to start if the file is missing |
+| `order-service/.../configuration/PublicKeyProvider.java` | **New** | Same, in order-service |
+| `user-service/.../service/JwtService.java` | Changed | `signWith(privateKey, Jwts.SIG.RS256)`; verifies with the public key |
+| `product-service/.../configuration/JwtService.java` | Changed | `verifyWith(publicKey)`; no `SecretKey` anywhere |
+| `order-service/.../configuration/JwtService.java` | Changed | Same, in order-service |
+| `JwtProperties.java` × 3 | Changed | `secret` removed. user-service keeps `expiryMinutes` + `issuer`; the other two keep `issuer` only |
+| `application.yml` × 3 | Changed | `jwt.secret` replaced by `jwt.key-directory` / `jwt.public-key-path` |
+| `.gitignore` | Changed | Adds `keys/`, `*.pem`, `*.p12`, `*.jks` |
+| `.env.example` | Changed | `JWT_SECRET` gone; documents that keys are generated, not configured. Adds the pgAdmin variables Compose requires |
+| `docker-compose.yml` | Changed | Mounts `./keys` — read-write for user-service, **read-only** for the other two |
+| `scripts/run.ps1` | Changed | Checks for the key pair instead of a secret, and skips test compilation |
+| `scripts/doctor.ps1` | Changed | Reports RS256, and warns if a stale `JWT_SECRET` is still in `.env` |
+| `user-service/.../JwtServiceTest.java` | Changed | Keys generated into a JUnit temp folder; new tests for RS256 |
+| `user-service/.../AuthServiceTest.java` | Changed | Same |
+| `user-service/.../SecurityRulesTest.java` | Changed | Loads `AuthController` into the slice |
+| `user-service/.../CustomerApiIntegrationTest.java` | Changed | Authenticates its own DELETE; keys go to `target/test-keys` |
+
+### Why the key is generated rather than configured
+
+A secret in `.env.example` gets copied verbatim into real deployments. A secret in a README ends
+up in the repository forever. Generating on first startup means the private key is never typed,
+pasted, emailed or committed — it simply appears on the machine that needs it and nowhere else.
+
+`keys/` and `*.pem` went into `.gitignore` **before** the first run, because git history is
+permanent: a private key committed and deleted in the next commit is still in every clone, and
+the only real remedy is generating a new pair and treating the old one as burned.
+
+### Two test failures fixed along the way
+
+Both pre-dated this change and had been hidden by building with `-DskipTests`. Both turned out to
+be bugs in the tests, not the application:
+
+- `SecurityRulesTest.loginIsPublic` expected 400, got **404**. `@WebMvcTest(CustomerController.class)`
+  builds a context containing only that controller, so `/api/v1/auth/login` did not exist. The test
+  would have passed identically if the endpoint had been deleted — it could not fail for the reason
+  it was written to catch.
+- `CustomerApiIntegrationTest.login_afterDeactivation_isRefused` expected 204, got **401**. The test
+  sent a `DELETE` with no `Authorization` header. The filter chain was correct to refuse it.
+
+### Result
+
+| | Before | After |
+|---|---|---|
+| Services able to issue a token | 3 | **1** |
+| Effect of compromising order-service | admin token for the whole platform | order data only |
+| Key rotation | coordinate a restart of all three | replace the private key, publish the new public one |
+| Key distribution | must stay secret in three places | public half is safe to publish |
+
+`mvn -pl user-service test` — 67 tests, 0 failures. `verify-phase2.ps1` — 48/48, including the
+token-relay check that exercises all three services with one token.
+
+### Known consequences
+
+- **Every token issued before the switch is now invalid.** Nothing can verify them. Clients log in
+  again; with a 15-minute expiry the window is small.
+- **user-service must start first on a fresh checkout.** It generates the pair; the other two
+  refuse to start without `keys/jwt-public.pem`. This is fail-fast by design — a verifier with no
+  key cannot authenticate anybody, and failing at startup beats failing on every request.
+- **The public key is distributed as a file.** Production systems publish it at
+  `/.well-known/jwks.json` so verifiers fetch it and rotation needs no redeployment. Deferred.
+- **Losing `keys/` logs everybody out.** The pair is not backed up anywhere; a new one is generated
+  and all existing tokens stop verifying.
 
 ---
 
@@ -398,10 +499,12 @@ not a style preference.
   can also *mint* one; a compromised product-service could issue itself an admin token. The fix
   is RS256 — user-service holds a private key, the others hold only the public key. Deferred
   deliberately, and worth naming in an interview.
+  *(Resolved in Phase 2, Step 9.)*
 - **There are no ADMIN users** unless you create one: `UPDATE customers SET role = 'ADMIN'
   WHERE email = '...'`, then log in again for a fresh token.
 - **All three services need the same `JWT_SECRET`** in `.env`, and the same `issuer` value.
   A mismatch rejects every token with no obvious clue why.
+  *(The shared secret was removed in Phase 2, Step 9; the `issuer` must still match.)*
 
 ---
 

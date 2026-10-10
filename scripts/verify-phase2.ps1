@@ -497,6 +497,30 @@ Assert-Status $r 429 'An unknown email is limited exactly like a real one' | Out
 Write-Lesson 'If only real accounts were limited, the 429 would reveal which emails are registered.'
 
 # ---------------------------------------------------------------------------
+# Clean up the privilege this run granted itself.
+#
+# Every run of this script promotes a throwaway customer to ADMIN. Without this
+# step those accounts accumulate: after six runs the database held seven
+# administrators, one real and six forgotten - a quarter of all accounts able to
+# read every customer record. Leftover privileged test accounts are a well-worn
+# route from one compromised login to a whole database.
+#
+# The rows are kept, only the role is dropped. Nothing is deleted.
+Write-Header 'CLEANUP - dropping the ADMIN role this run granted'
+
+$cleanupSql = "UPDATE customers SET role = 'CUSTOMER' WHERE id = '$($alice.Id)'"
+docker exec ecommerce-postgres psql -U $superuser -d ecommerce_user_db -c $cleanupSql 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host '   [OK]   alice demoted back to CUSTOMER - no admin left behind' -ForegroundColor Green
+} else {
+    Write-Host '   [WARN] Could not demote alice. Check for leftover admins with:' -ForegroundColor Yellow
+    Write-Host "          SELECT email, role FROM customers WHERE role = 'ADMIN'" -ForegroundColor Yellow
+}
+Write-Lesson 'A test suite that writes to a shared database has to tidy up after itself.'
+Write-Lesson 'The integration tests avoid this entirely by using a throwaway Testcontainers'
+Write-Lesson 'database - but this script runs against the real stack, which is the point of it.'
+
+# ---------------------------------------------------------------------------
 Write-Header 'SUMMARY'
 
 Write-Host ''
@@ -504,7 +528,7 @@ Write-Host "  Passed: $script:Passed" -ForegroundColor Green
 Write-Host "  Failed: $script:Failed" -ForegroundColor $(if ($script:Failed -gt 0) { 'Red' } else { 'DarkGray' })
 Write-Host ''
 Write-Host '  Test data created by this run (left in place, nothing deleted):' -ForegroundColor DarkGray
-Write-Host "    alice (ADMIN) $($alice.Email)" -ForegroundColor DarkGray
+Write-Host "    alice         $($alice.Email)  (was ADMIN during the run, now demoted)" -ForegroundColor DarkGray
 Write-Host "    bob           $($bob.Email)" -ForegroundColor DarkGray
 Write-Host "    carol         $($carol.Email)" -ForegroundColor DarkGray
 Write-Host "    dave          $($dave.Email)  (rate-limited for about a minute)" -ForegroundColor DarkGray

@@ -174,23 +174,35 @@ if (-not (Test-Path ".env")) {
         $envOk = $true
     }
 
-    # Phase 2 ships with a shared secret; Step 9 replaces it with a key pair.
-    # Accept either, but say which one is in force.
-    if (-not [string]::IsNullOrWhiteSpace($env:JWT_SECRET)) {
-        if ($env:JWT_SECRET.Length -lt 32) {
-            Write-Fail "JWT_SECRET is only $($env:JWT_SECRET.Length) characters" "HS256 needs at least 32. A length of 13 means the literal placeholder leaked through."
-        } else {
-            Write-Ok "JWT_SECRET present ($($env:JWT_SECRET.Length) chars) - signing mode: HS256 (shared secret)"
-        }
-    } elseif (-not [string]::IsNullOrWhiteSpace($env:JWT_KEY_DIR)) {
-        Write-Ok "JWT_KEY_DIR present - signing mode: RS256 (key pair)"
-        if (Test-Path (Join-Path $root "keys\jwt-public.pem")) {
-            Write-Ok "Public key found at keys\jwt-public.pem"
-        } else {
-            Write-Warn "No keys\jwt-public.pem yet" "Start user-service first - it generates the pair on first run."
-        }
+    # pgAdmin's password is declared required in docker-compose.yml, and Compose
+    # validates every service in the file even when you start only one - so a
+    # missing value here breaks "docker compose up -d postgres" with an error
+    # that appears to be about pgAdmin.
+    if ([string]::IsNullOrWhiteSpace($env:PGADMIN_PASSWORD)) {
+        Write-Warn "PGADMIN_PASSWORD is not set" "Add it to .env, or 'docker compose up' will refuse to start anything."
+    }
+
+    # Tokens are signed with an RSA key pair. The private key is what matters:
+    # anyone holding it can mint an admin token for any account.
+    $keyDir = $env:JWT_KEY_DIR
+    if ([string]::IsNullOrWhiteSpace($keyDir)) { $keyDir = "keys" }
+    $keyPath = Join-Path $root ($keyDir -replace '^\.\./', '')
+
+    $privateKey = Join-Path $keyPath "jwt-private.pem"
+    $publicKey = Join-Path $keyPath "jwt-public.pem"
+
+    if ((Test-Path $privateKey) -and (Test-Path $publicKey)) {
+        Write-Ok "RSA key pair present - signing mode: RS256"
+        Write-Info "Private key signs (user-service only). Public key verifies (all three)."
+    } elseif (Test-Path $publicKey) {
+        Write-Ok "Public key present - this checkout can verify tokens but not issue them"
     } else {
-        Write-Fail "Neither JWT_SECRET nor JWT_KEY_DIR is set" "One of them must be present for tokens to be signed."
+        Write-Warn "No key pair in $keyPath yet" "Start user-service first - it generates the pair on its first run."
+    }
+
+    # A leftover shared secret is harmless but misleading: nothing reads it any more.
+    if (-not [string]::IsNullOrWhiteSpace($env:JWT_SECRET)) {
+        Write-Warn "JWT_SECRET is still set in .env but is no longer used" "Remove the line - tokens are signed with the RSA key pair now."
     }
 }
 
@@ -290,4 +302,4 @@ if ($script:Failures -eq 0 -and $script:Warnings -eq 0) {
     Write-Host "   Fix the FIRST failure above and run this again. Later checks are" -ForegroundColor DarkGray
     Write-Host "   often just the first one echoing downstream." -ForegroundColor DarkGray
 }
-Write-Host ""
+Write-Host ""

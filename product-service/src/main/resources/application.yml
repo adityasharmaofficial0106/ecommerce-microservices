@@ -1,5 +1,9 @@
 jwt:
-  secret: ${JWT_SECRET}
+  # The PUBLIC half of user-service's signing key. It verifies signatures and cannot
+  # produce them, so this service is structurally incapable of issuing a token. The file
+  # is not a secret; it is kept out of git only because it is generated, not authored.
+  public-key-path: ${JWT_PUBLIC_KEY_PATH:../keys/jwt-public.pem}
+  # Must match the issuer user-service puts in the token, or every token is rejected.
   issuer: ecommerce-user-service
 
 spring:

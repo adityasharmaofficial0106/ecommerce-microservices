@@ -42,9 +42,11 @@ server:
   shutdown: graceful
 
 jwt:
-  # NO default. A hard-coded fallback signing key is how a project ends up shipping with
-  # a secret that anyone reading the repository already knows.
-  secret: ${JWT_SECRET}
+  # Where the RSA key pair lives. This service is the only one that holds a PRIVATE key,
+  # and therefore the only one that can issue a token. RsaKeyProvider generates the pair
+  # on first startup if the directory is empty, so there is no secret to invent, paste or
+  # share by hand. The directory is git-ignored.
+  key-directory: ${JWT_KEY_DIR:../keys}
   # Short on purpose. A token cannot be un-issued, so expiry is what bounds the damage
   # when one leaks or an account is deactivated. See the walkthrough.
   expiry-minutes: ${JWT_EXPIRY_MINUTES:15}
