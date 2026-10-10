@@ -32,7 +32,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @Testcontainers
 @TestPropertySource(properties = {
-        "jwt.secret=integration-test-secret-long-enough-for-hs256",
+        // Keys go to a throwaway folder under target/, so a test run never reads or
+        // overwrites the real keys/ directory at the project root. "mvn clean" removes it.
+        "jwt.key-directory=target/test-keys",
         "jwt.expiry-minutes=15"
 })
 class CustomerApiIntegrationTest {
@@ -190,7 +192,11 @@ class CustomerApiIntegrationTest {
                 .andReturn().getResponse().getContentAsString();
         String id = JsonPath.read(body, "$.id");
 
-        mockMvc.perform(delete("/api/v1/customers/{id}", id)).andExpect(status().isNoContent());
+        // Deactivating is a protected action, so the request needs a token. Without one the
+        // filter chain correctly answered 401 and this test failed on its own setup step -
+        // the application was right and the test was wrong.
+        mockMvc.perform(withToken(delete("/api/v1/customers/{id}", id), tokenFor(email)))
+                .andExpect(status().isNoContent());
 
         mockMvc.perform(post("/api/v1/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)

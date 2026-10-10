@@ -5,6 +5,7 @@ import com.ecommerce.user.configuration.SecurityConfig;
 import com.ecommerce.user.configuration.SecurityProblemHandlers;
 import com.ecommerce.user.dto.CustomerResponse;
 import com.ecommerce.user.entity.CustomerStatus;
+import com.ecommerce.user.service.AuthService;
 import com.ecommerce.user.service.CustomerService;
 import com.ecommerce.user.service.JwtService;
 import org.junit.jupiter.api.DisplayName;
@@ -34,8 +35,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <p>Security rules are exactly the kind of code that looks right and is wrong: an annotation
  * with a typo in the expression silently allows everything. These tests would catch that.
+ *
+ * <p>Note that BOTH controllers are loaded into the slice. A @WebMvcTest builds a cut-down
+ * Spring context containing only the controllers it is told about, so with CustomerController
+ * alone the login URL did not exist and the "login is public" test received 404 instead of the
+ * 400 it expected. A 404 would also be returned if the endpoint were deleted entirely, so the
+ * test was incapable of failing for the reason it was written to catch.
  */
-@WebMvcTest(CustomerController.class)
+@WebMvcTest({CustomerController.class, AuthController.class})
 @Import({SecurityConfig.class, JwtAuthenticationFilter.class, SecurityProblemHandlers.class})
 class SecurityRulesTest {
 
@@ -46,6 +53,9 @@ class SecurityRulesTest {
     private CustomerService customerService;
     @MockitoBean
     private JwtService jwtService;
+    /** AuthController needs this bean to exist; the login test never reaches it. */
+    @MockitoBean
+    private AuthService authService;
 
     private final UUID jane = UUID.randomUUID();
     private final UUID bob = UUID.randomUUID();
@@ -67,11 +77,16 @@ class SecurityRulesTest {
     @Test
     @DisplayName("login stays public: you cannot require a token to obtain a token")
     void loginIsPublic() throws Exception {
-        // 400 (bad body), NOT 401 - proving the path itself is reachable without a token
+        // 400 (bad body), NOT 401 - proving the path itself is reachable without a token.
+        // An empty JSON object fails bean validation in the controller, which is only
+        // possible if the filter chain let the request through in the first place.
         mockMvc.perform(post("/api/v1/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isBadRequest());
+
+        // And the request really did reach validation rather than the service
+        verifyNoInteractions(authService);
     }
 
     @Test

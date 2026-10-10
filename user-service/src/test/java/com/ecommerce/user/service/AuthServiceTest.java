@@ -1,6 +1,7 @@
 package com.ecommerce.user.service;
 
 import com.ecommerce.user.configuration.JwtProperties;
+import com.ecommerce.user.configuration.RsaKeyProvider;
 import com.ecommerce.user.dto.LoginRequest;
 import com.ecommerce.user.dto.TokenResponse;
 import com.ecommerce.user.entity.Customer;
@@ -12,10 +13,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.nio.file.Path;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -43,10 +46,18 @@ class AuthServiceTest {
 
     private static final String IP = "203.0.113.7";
 
+    /**
+     * Static, so one throwaway key pair is generated for the whole class rather than one per
+     * test. RsaKeyProvider loads the existing pair on every call after the first.
+     */
+    @TempDir
+    static Path keyDir;
+
     @BeforeEach
     void setUp() {
         JwtService jwtService = new JwtService(
-                new JwtProperties("test-secret-that-is-long-enough-for-hs256!", 15, "issuer"));
+                new JwtProperties(15, "issuer"),
+                new RsaKeyProvider(keyDir.toString()));
         authService = new AuthService(customerRepository, passwordEncoder, jwtService, loginRateLimiter);
     }
 

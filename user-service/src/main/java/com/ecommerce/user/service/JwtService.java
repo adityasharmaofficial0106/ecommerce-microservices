@@ -1,14 +1,14 @@
 package com.ecommerce.user.service;
 
 import com.ecommerce.user.configuration.JwtProperties;
+import com.ecommerce.user.configuration.RsaKeyProvider;
 import com.ecommerce.user.entity.Customer;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.springframework.stereotype.Service;
 
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
@@ -20,10 +20,22 @@ import java.util.UUID;
  * <p>A JWT has three dot-separated parts: header, payload and signature. The payload is only
  * BASE64-ENCODED, never encrypted - anyone holding the token can read it. What they cannot do
  * is CHANGE it: altering one character breaks the signature, and producing a valid replacement
- * requires the secret key.
+ * requires the signing key.
  *
  * <p>The rule that follows: never put anything secret in a token. Ids, roles and timestamps are
  * fine. Passwords, card numbers and personal details are not.
+ *
+ * <h2>Why RS256 and not HS256</h2>
+ *
+ * <p>HS256 signs with a shared secret, and the same secret both creates and checks a signature.
+ * That meant product-service and order-service, which only ever need to CHECK tokens, also held
+ * everything required to MINT one - including a token claiming any customer id with the ADMIN
+ * role. A break-in at any single service was a break-in at all three.
+ *
+ * <p>RS256 splits the key in two. This service holds the private half and is the only thing on
+ * the platform that can issue a token. The other services hold the public half, which verifies
+ * signatures and is mathematically incapable of producing them. That is not a rule anyone
+ * enforces; it is a property of the mathematics.
  */
 @Service
 public class JwtService {
@@ -32,18 +44,19 @@ public class JwtService {
     public static final String CLAIM_ROLE = "role";
 
     private final JwtProperties properties;
-    private final SecretKey signingKey;
 
-    public JwtService(JwtProperties properties) {
+    /** Signs. Exists only in this service, and never leaves it. */
+    private final RSAPrivateKey privateKey;
+
+    /** Verifies. This service checks its own tokens too, e.g. on an authenticated request. */
+    private final RSAPublicKey publicKey;
+
+    public JwtService(JwtProperties properties, RsaKeyProvider keyProvider) {
         this.properties = properties;
-        byte[] keyBytes = properties.secret().getBytes(StandardCharsets.UTF_8);
-        // HS256 needs at least 256 bits. Failing at startup beats discovering a too-short
-        // key on the first login attempt after deployment.
-        if (keyBytes.length < 32) {
-            throw new IllegalStateException(
-                    "jwt.secret must be at least 32 characters (256 bits) for HS256; got " + keyBytes.length);
-        }
-        this.signingKey = Keys.hmacShaKeyFor(keyBytes);
+        this.privateKey = keyProvider.privateKey();
+        this.publicKey = keyProvider.publicKey();
+        // No key-length check is needed here any more. RsaKeyProvider either loads a valid
+        // pair or generates a 2048-bit one, and fails startup if it can do neither.
     }
 
     /**
@@ -65,7 +78,10 @@ public class JwtService {
                 .id(UUID.randomUUID().toString())
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(expiry))
-                .signWith(signingKey)
+                // The algorithm is now stated explicitly. With a shared secret jjwt could infer
+                // it from the key type; with a key pair, saying RS256 out loud is clearer and
+                // guards against an accidental downgrade.
+                .signWith(privateKey, Jwts.SIG.RS256)
                 .compact();
     }
 
@@ -85,7 +101,9 @@ public class JwtService {
      */
     public TokenPayload parseToken(String token) {
         Claims claims = Jwts.parser()
-                .verifyWith(signingKey)
+                // Verification uses the PUBLIC key, even here. Nothing in the checking path
+                // needs the private half.
+                .verifyWith(publicKey)
                 // Reject a token minted by something else, even if it were somehow signed
                 // with our key. Checking the issuer costs nothing and closes a door.
                 .requireIssuer(properties.issuer())
